@@ -1,8 +1,12 @@
-#define STB_IMAGE_IMPLEMENTATION
 #define TINYOBJLOADER_IMPLEMENTATION
+#define STB_IMAGE_IMPLEMENTATION
+#define CGLTF_IMPLEMENTATION
 #include "stb/stb_image.h"
-#include "tinyobjloader/tiny_obj_loader.h"
+#include "tinygltf/tiny_obj_loader.h"
+#include "cgltf.h"
 
+#include "fastgltf/core.hpp"
+#include "fastgltf/types.hpp"
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
@@ -17,6 +21,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <unordered_map>
+#include <filesystem>
 
 const int WINDOW_WIDTH = 1600;
 const int WINDOW_HEIGHT = 800;
@@ -74,7 +79,7 @@ class Mesh {
 
             setupMesh();
         }
-        void Draw(GLuint &shader, const glm::mat4& view, const glm::mat4& projection, glm::vec3 position, float rotationAngle, glm::vec3 scale);
+        void Draw(GLuint &shader, const glm::mat4& view, const glm::mat4& projection, glm::vec3 position, float rotationAngleX, float rotationAngleY, float rotationAngleZ, glm::vec3 scale);
 
     private:
         unsigned int VAO, VBO, EBO;
@@ -82,6 +87,18 @@ class Mesh {
         void setupMesh();
 
 };
+
+namespace std {
+    template<> struct hash<Vertex> {
+        size_t operator()(const Vertex& v) const {
+            // Simple hash combine, you might want a better one for production
+            size_t h1 = hash<float>()(v.Position.x) ^ (hash<float>()(v.Position.y) << 1) ^ (hash<float>()(v.Position.z) << 2);
+            size_t h2 = hash<float>()(v.Normal.x) ^ (hash<float>()(v.Normal.y) << 1) ^ (hash<float>()(v.Normal.z) << 2);
+            size_t h3 = hash<float>()(v.TexCoords.x) ^ (hash<float>()(v.TexCoords.y) << 1);
+            return h1 ^ (h2 << 1) ^ (h3 << 2);
+        }
+    };
+}
 
 void Mesh::setupMesh()
 {
@@ -93,7 +110,7 @@ void Mesh::setupMesh()
     glBindVertexArray(this->VAO);
     glBindBuffer(GL_ARRAY_BUFFER, this->VBO);
 
-    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), &vertices[0], GL_STATIC_DRAW);  
+    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), &vertices[0], GL_STATIC_DRAW);
 
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, this->EBO);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), 
@@ -164,13 +181,110 @@ Mesh LoadMeshFromOBJ(const std::string& path)
     return Mesh(vertices, indices, textures);
 }
 
-void Mesh::Draw(GLuint &shader, const glm::mat4& view, const glm::mat4& projection, glm::vec3 position, float rotationAngle, glm::vec3 scale)
+Mesh LoadMeshFromGLTF(const std::string& path)
+{
+    cgltf_options options = {};
+    cgltf_data* data = nullptr;
+
+    cgltf_result result = cgltf_parse_file(&options, path.c_str(), &data);
+    if (result != cgltf_result_success) {
+        std::cerr << "Failed to parse glTF file: " << path << "\n";
+        return Mesh({}, {}, {});
+    }
+
+    std::string baseDir = path.substr(0, path.find_last_of("/\\") + 1);
+
+    if (data->buffers_count > 0 && data->buffers[0].uri != nullptr &&
+        strstr(data->buffers[0].uri, "data:") != data->buffers[0].uri) {
+        
+        result = cgltf_load_buffers(&options, data, baseDir.c_str());
+        if (result != cgltf_result_success) {
+            std::cerr << "Failed to load buffers: " << path << "\n";
+            cgltf_free(data);
+            return Mesh({}, {}, {});
+        }
+    }
+
+    const cgltf_mesh& gltfMesh = data->meshes[0];
+    const cgltf_primitive& prim = gltfMesh.primitives[0];
+
+    const cgltf_accessor* posAcc = nullptr;
+    const cgltf_accessor* normAcc = nullptr;
+    const cgltf_accessor* uvAcc = nullptr;
+    const cgltf_accessor* idxAcc = prim.indices;
+
+    for (size_t i = 0; i < prim.attributes_count; ++i) {
+        const cgltf_attribute& attr = prim.attributes[i];
+        if (strcmp(attr.name, "POSITION") == 0) posAcc = attr.data;
+        else if (strcmp(attr.name, "NORMAL") == 0) normAcc = attr.data;
+        else if (strcmp(attr.name, "TEXCOORD_0") == 0) uvAcc = attr.data;
+    }
+
+    if (!posAcc || !idxAcc) {
+        std::cerr << "POSITION or INDICES missing in mesh.\n";
+        cgltf_free(data);
+        return Mesh({}, {}, {});
+    }
+
+    const float* positions = (const float*)((uint8_t*)posAcc->buffer_view->buffer->data + posAcc->buffer_view->offset + posAcc->offset);
+    const float* normals = normAcc ? (const float*)((uint8_t*)normAcc->buffer_view->buffer->data + normAcc->buffer_view->offset + normAcc->offset) : nullptr;
+    const float* uvs = uvAcc ? (const float*)((uint8_t*)uvAcc->buffer_view->buffer->data + uvAcc->buffer_view->offset + uvAcc->offset) : nullptr;
+
+    std::vector<Vertex> vertices;
+    for (size_t i = 0; i < posAcc->count; ++i) {
+        Vertex vertex{};
+        vertex.Position = glm::vec3(
+            positions[i * 3 + 0],
+            positions[i * 3 + 1],
+            positions[i * 3 + 2]
+        );
+
+        vertex.Normal = normals ? glm::vec3(
+            normals[i * 3 + 0],
+            normals[i * 3 + 1],
+            normals[i * 3 + 2]
+        ) : glm::vec3(0.0f, 0.0f, 1.0f);
+
+        vertex.TexCoords = uvs ? glm::vec2(
+            uvs[i * 2 + 0],
+            uvs[i * 2 + 1]
+        ) : glm::vec2(0.0f, 0.0f);
+
+        vertices.push_back(vertex);
+    }
+
+    std::vector<unsigned int> indices;
+    void* indexData = (uint8_t*)idxAcc->buffer_view->buffer->data + idxAcc->buffer_view->offset + idxAcc->offset;
+    for (size_t i = 0; i < idxAcc->count; ++i) {
+        switch (idxAcc->component_type) {
+            case cgltf_component_type_r_16u:
+                indices.push_back(((uint16_t*)indexData)[i]);
+                break;
+            case cgltf_component_type_r_32u:
+                indices.push_back(((uint32_t*)indexData)[i]);
+                break;
+            case cgltf_component_type_r_8u:
+                indices.push_back(((uint8_t*)indexData)[i]);
+                break;
+            default:
+                std::cerr << "Unsupported index component type\n";
+                break;
+        }
+    }
+
+    cgltf_free(data);
+    return Mesh(vertices, indices, {});
+}
+
+void Mesh::Draw(GLuint &shader, const glm::mat4& view, const glm::mat4& projection, glm::vec3 position, float rotationAngleX, float rotationAngleY, float rotationAngleZ, glm::vec3 scale)
 {
     glUseProgram(shader);
 
     glm::mat4 model = glm::mat4(1.0f);
     model = glm::translate(model, position);
-    model = glm::rotate(model, rotationAngle, glm::vec3(0.0f, 1.0f, 0.0f));
+    model = glm::rotate(model, rotationAngleX, glm::vec3(1.0f, 0.0f, 0.0f));
+    model = glm::rotate(model, rotationAngleY, glm::vec3(0.0f, 1.0f, 0.0f));
+    model = glm::rotate(model, rotationAngleZ, glm::vec3(0.0f, 0.0f, 1.0f));
     model = glm::scale(model, scale);
 
     glm::mat4 mvp = projection * view * model;
@@ -440,6 +554,44 @@ GLuint LoadTextureFromFile(const char* filepath) {
     return textureID;
 }
 
+GLuint LoadGLTFTexture(cgltf_data* data, const char* basePath, int imageIndex) {
+    cgltf_image* image = &data->images[imageIndex];
+    
+    if (image->uri && !image->buffer_view) {
+        std::string imagePath = std::string(basePath) + "/" + image->uri;
+        return LoadTextureFromFile(imagePath.c_str());
+    }
+
+    if(image->buffer_view && image->buffer_view->buffer->data) {
+        const unsigned char* bufferData = (const unsigned char*)image->buffer_view->buffer->data;
+        size_t offset = image->buffer_view->offset;
+        size_t size = image->buffer_view->size;
+
+        int width, height, channels;
+        unsigned char* pixels = stbi_load_from_memory(bufferData + offset, size, &width, &height, &channels, 0);
+
+        if (!pixels) {
+            std::cerr << "Failed to load embedded image from glTF buffer view\n";
+            return 0;
+        }
+
+        GLuint textureID;
+        glGenTextures(1, &textureID);
+        glBindTexture(GL_TEXTURE_2D, textureID);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+        GLenum format = (channels == 4) ? GL_RGBA : GL_RGB;
+        glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, pixels);
+        glGenerateMipmap(GL_TEXTURE_2D);
+        return textureID;
+    }
+    std::cerr << "Texture format not supported (no URI and no buffer view)\n";
+    return 0;
+}
+
 void drawPlane3D(GLuint shaderProgram, 
                     glm::vec3 pos, 
                     glm::vec3 scale,
@@ -660,7 +812,14 @@ int main() {
 
     GLuint skullTexture = LoadTextureFromFile("models/Skull.jpg");
     Skull.textures.push_back({ skullTexture, "diffuse" });
+
+    Mesh TeaPot = LoadMeshFromGLTF("models/scene.gltf");
     
+    GLuint TeaPotTex = LoadTextureFromFile("models/teapottex.png");
+    TeaPot.textures.push_back({ TeaPotTex, "diffuse" });
+
+    Mesh BuildingModel = LoadMeshFromGLTF("models/building/scene.gltf");
+
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO(); (void)io;
@@ -668,8 +827,11 @@ int main() {
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
     float sphereX = 0.0f, sphereY = 1.0f, sphereZ = 0.0f;
-    while (!glfwWindowShouldClose(window)) {
 
+    float SkullRotation = 0.0;
+
+    while (!glfwWindowShouldClose(window)) {
+        SkullRotation += 0.1;
         inputHandler(window);
 
         glClearColor(0.1f, 0.2f, 0.3f, 1.0f);
@@ -701,7 +863,29 @@ int main() {
             cam.view,
             cam.projection,
             glm::vec3(0.0f, 0.0f, 0.0f),
-            glm::radians(45.0f),
+            glm::radians(270.0f),
+            glm::radians(0.0f),
+            glm::radians(360.0f),
+            glm::vec3(0.5f)
+        );
+
+        TeaPot.Draw(shaderProgram,
+            cam.view,
+            cam.projection,
+            glm::vec3(0.0f, 20.0f, 0.0f),
+            glm::radians(270.0f),
+            glm::radians(0.0f),
+            glm::radians(360.0f),
+            glm::vec3(0.5f)
+        );
+
+        BuildingModel.Draw(shaderProgram,
+            cam.view,
+            cam.projection,
+            glm::vec3(5.0f, 20.0f, 0.0f),
+            glm::radians(270.0f),
+            glm::radians(0.0f),
+            glm::radians(360.0f),
             glm::vec3(0.5f)
         );
 

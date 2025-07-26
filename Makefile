@@ -12,7 +12,7 @@ else
 	CXXFLAGS += -O2 -flto # Add optimizations and Link-Time Optimization
 endif
 
-INCLUDES = -Iglad -Iimgui -Iimgui/backends -Itinyobjloader -Istb
+INCLUDES = -Iglad -Iimgui -Iimgui/backends -Itinygltf -Istb -Ijson -Ifastgltf/include -Isimdjson/include -Iincludes
 
 LDLIBS = -lglfw -ldl -lGL
 
