@@ -1,0 +1,11 @@
+Model Information:
+* title:	teapot
+* source:	https://sketchfab.com/3d-models/teapot-28d49c6d77f6414a929c4a2f47ebefbf
+* author:	vigerium (https://sketchfab.com/vigerium)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "teapot" (https://sketchfab.com/3d-models/teapot-28d49c6d77f6414a929c4a2f47ebefbf) by vigerium (https://sketchfab.com/vigerium) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
